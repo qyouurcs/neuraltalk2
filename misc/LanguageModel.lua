@@ -304,7 +304,7 @@ function layer:updateOutput(input)
   self.lookup_tables_inputs = {}
   self.tmax = 0 -- we will keep track of max sequence length encountered in the data for efficiency
   for t=1,self.seq_length+2 do
-
+    debugger.enter()
     local can_skip = false
     local xt
     if t == 1 then
