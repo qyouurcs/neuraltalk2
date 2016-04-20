@@ -68,7 +68,7 @@ end
 -- We assume, each sentence is started with a special start token.
 function layer:forward(input)
     local imgs = input[1] -- N * K
-    local seq = input[2] -- D * N * V_C (V_C = opt.char_vocab_size)
+    local seq = input[2] -- D * N (V_C = opt.char_vocab_size)
     local char_seq = input[3] -- D * N * V_C (V_C = opt.char_vocab_size)
     local char_to_ix = input[4]
 
@@ -165,7 +165,7 @@ function layer:backward(input, gradOutput)
     local seq = input[2] -- D * N * V_C (V_C = opt.char_vocab_size)
     local char_seq = input[3]
     local char_to_ix = input[4]
-
+    
     for t = self.tmax, 1, -1 do
         -- concat state gradients and output vector gradients at time step t
         local dout = {}
@@ -334,9 +334,9 @@ function layer:sample(imgs, char_to_ix, ix_to_word, opt)
 
       local chars_i
       if #it:size() == 1 then
-          chars_i = torch.LongTensor( batch_size, self.max_word_l):fill(1)
+          chars_i = torch.LongTensor( batch_size, self.max_word_l):fill(char_to_ix[' '])
       else
-          chars_i = torch.LongTensor(it:size(2), batch_size, self.max_word_l):fill(1)
+          chars_i = torch.LongTensor(it:size(2), batch_size, self.max_word_l):fill(char_to_ix[' '])
       end
       if #it:size() == 1 then
           for i_w, w_w in pairs(words) do
@@ -436,7 +436,7 @@ function layer:sample_beam(imgs, char_to_ix, ix_to_word, opt)
         local logprobsf = logprobs:float() -- lets go to CPU for more efficiency in indexing operations
         ys,ix = torch.sort(logprobsf,2,true) -- sorted array of logprobs along each previous beam (last true = descending)
         local candidates = {}
-        local cols = math.min(beam_size,ys:size(2))
+        local cols = math.max(beam_size,ys:size(2))
         local rows = beam_size
         if t == 3 then rows = 1 end -- at first time step only the first beam is active
         for c=1,cols do -- for each column (word, essentially)
@@ -457,31 +457,45 @@ function layer:sample_beam(imgs, char_to_ix, ix_to_word, opt)
           beam_seq_prev = beam_seq[{ {1,t-3}, {} }]:clone()
           beam_seq_logprobs_prev = beam_seq_logprobs[{ {1,t-3}, {} }]:clone()
         end
-        for vix=1,beam_size do
+
+        local vix = 1
+        local vix_cnt = 1
+        while true do
+
+          if vix_cnt > beam_size then
+              break
+          end
+
           local v = candidates[vix]
           -- fork beam index q into index vix
           if t > 3 then
-            beam_seq[{ {1,t-3}, vix }] = beam_seq_prev[{ {}, v.q }]
-            beam_seq_logprobs[{ {1,t-3}, vix }] = beam_seq_logprobs_prev[{ {}, v.q }]
+            beam_seq[{ {1,t-3}, vix_cnt }] = beam_seq_prev[{ {}, v.q }]
+            beam_seq_logprobs[{ {1,t-3}, vix_cnt }] = beam_seq_logprobs_prev[{ {}, v.q }]
           end
           -- rearrange recurrent states
           for state_ix = 1,#new_state do
             -- copy over state in previous beam q to new beam at vix
-            new_state[state_ix][vix] = state[state_ix][v.q]
+            new_state[state_ix][vix_cnt] = state[state_ix][v.q]
           end
           -- append new end terminal at the end of this beam
-          beam_seq[{ t-2, vix }] = v.c -- c'th word is the continuation
-          beam_seq_logprobs[{ t-2, vix }] = v.r -- the raw logprob here
-          beam_logprobs_sum[vix] = v.p -- the new (sum) logprob along this beam
+          beam_seq[{ t-2, vix_cnt }] = v.c -- c'th word is the continuation
+          beam_seq_logprobs[{ t-2, vix_cnt }] = v.r -- the raw logprob here
+          beam_logprobs_sum[vix_cnt] = v.p -- the new (sum) logprob along this beam
 
           if v.c == self.vocab_size+1 or t == self.seq_length+2 then
             -- END token special case here, or we reached the end.
             -- add the beam to a set of done beams
-            table.insert(done_beams, {seq = beam_seq[{ {}, vix }]:clone(), 
-                                      logps = beam_seq_logprobs[{ {}, vix }]:clone(),
-                                      p = beam_logprobs_sum[vix]
+            -- NOw, we need to back one.
+            table.insert(done_beams, {seq = beam_seq[{ {}, vix_cnt }]:clone(), 
+                                      logps = beam_seq_logprobs[{ {}, vix_cnt }]:clone(),
+                                      p = beam_logprobs_sum[vix_cnt]
                                      })
+            if v.c == self.vocab_size + 1 then
+                vix_cnt = vix_cnt - 1
+            end
           end
+          vix = vix + 1
+          vix_cnt = vix_cnt + 1
         end
         
         -- encode as vectors
@@ -490,7 +504,7 @@ function layer:sample_beam(imgs, char_to_ix, ix_to_word, opt)
         local char_it = torch.LongTensor(it:size(1), self.max_word_l):fill(char_to_ix[' '])
         char_it[{{}, 1}]:fill(char_to_ix['{'])
         for i_it = 1, it:size(1) do
-          w_i = ix_to_word[i_it]
+          w_i = ix_to_word[tostring(it[i_it])]
           local kk = 1
           for cc in w_i:gmatch(".") do
               char_it[{i_it, kk+1}] = char_to_ix[cc]
@@ -509,7 +523,6 @@ function layer:sample_beam(imgs, char_to_ix, ix_to_word, opt)
       state = {}
       for i=1,self.num_state do table.insert(state, out[i]) end
     end
-
     table.sort(done_beams, compare)
     seq[{ {}, k }] = done_beams[1].seq -- the first beam has highest cumulative score
     seqLogprobs[{ {}, k }] = done_beams[1].logps

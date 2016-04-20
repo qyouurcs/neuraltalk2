@@ -32,7 +32,7 @@ for i = 65,65+26 do
 end
 
 
-ix_to_word = {[1]='trats',[2]='HELLO',[3]='WORLD',[4]='NIHAO', [5] = 'SHIJIE',[10]="OPT", [6] = "MAN", [7] = "AN", [8] = "THE", [9] = "GOOD"}
+ix_to_word = {['1']='trats',['2']='HELLO',['3']='WORLD',['4']='NIHAO', ['5'] = 'SHIJIE',['10']="OPT", ['6'] = "MAN", ['7'] = "AN", ['8'] = "THE", ['9'] = "GOOD"}
 
 
 local tests = {}
@@ -157,22 +157,15 @@ local function gradCheckLM()
   crit:type(dtype)
 
   local seq = torch.LongTensor(opt.seq_length, opt.batch_size):random(opt.vocab_size)
+
+  seq[{ {4, 7}, 1 }] = 0
+  seq[{ {5, 7}, 6 }] = 0
   local seq_chars = torch.LongTensor(opt.seq_length, opt.batch_size, opt.max_word_l):random(opt.char_vocab_size-2)
 
   local imgs = torch.randn(opt.batch_size, opt.input_encoding_size):type(dtype)
 
   -- evaluate the analytic gradient
-  local char_to_ix = {}
-  char_to_ix['{'] = 2
-  char_to_ix[' '] = 1
-  char_to_ix['}'] = 3
-  char_to_ix['#'] = 4
-  char_to_ix['S'] = 5
-  char_to_ix['T'] = 6
-  char_to_ix['A'] = 7
-  char_to_ix['R'] = 8
-
-
+  --debugger.enter()
   local output = lm:forward{imgs,seq, seq_chars, char_to_ix}
   local w = torch.randn(output:size(1), output:size(2), output:size(3))
   -- generate random weighted sum criterion
@@ -189,8 +182,9 @@ local function gradCheckLM()
 
   local gradInput_num = gradcheck.numeric_gradient(f, imgs, 1, 1e-6)
 
-  -- print(gradInput)
-  -- print(gradInput_num)
+  print(gradInput)
+  print(gradInput_num)
+  debugger.enter()
   -- local g = gradInput:view(-1)
   -- local gn = gradInput_num:view(-1)
   -- for i=1,g:nElement() do
@@ -297,7 +291,20 @@ local function overfit()
   crit:type(dtype)
 
   local seq = torch.LongTensor(opt.seq_length, opt.batch_size):random(opt.vocab_size)
-  local seq_chars = torch.LongTensor(opt.seq_length, opt.batch_size, opt.max_word_l):random(opt.char_vocab_size-2)
+  local seq_chars = torch.LongTensor(opt.seq_length, opt.batch_size, opt.max_word_l):fill(char_to_ix[' '])
+  for i = 1,opt.seq_length do
+      for j = 1, opt.batch_size do
+          w = ix_to_word[tostring(seq[i][j])]
+          seq_chars[i][j][1] = char_to_ix['{']
+          local kk = 1
+          for cc in w:gmatch(".") do
+              seq_chars[i][j][kk +1] = char_to_ix[cc]
+              kk = kk + 1
+          end
+          local last_idx = math.min(opt.max_word_l, kk + 2)
+          seq_chars[i][j][last_idx] = char_to_ix['}']
+      end
+  end
   local imgs = torch.randn(opt.batch_size, opt.input_encoding_size):type(dtype)
 
   local params, grad_params = lm:getParameters()
@@ -320,7 +327,7 @@ local function overfit()
   local loss
   local grad_cache = grad_params:clone():fill(1e-8)
   print('trying to overfit the language model on toy data:')
-  for t=1,30 do
+  for t=1,100 do
     loss = lossFun()
     -- test that initial loss makes sense
     if t == 1 then tester:assertlt(math.abs(math.log(opt.vocab_size+1) - loss), 0.1) end
@@ -427,7 +434,8 @@ local function sample_beam()
   tester:assertTensorEq(logprobs_vanilla, logprobs, 1e-6) -- logprobs too
 
   -- doing beam search with higher beam size should yield higher likelihood sequences
-  local seq2, logprobs2 = lm:sample(imgs, char_to_ix, ix_to_word, {beam_size = 8})
+  local seq2, logprobs2 = lm:sample(imgs, char_to_ix, ix_to_word, {beam_size = 3})
+  print(seq2)
   local logsum = torch.sum(logprobs, 1)
   local logsum2 = torch.sum(logprobs2, 1)
   print('')
@@ -447,10 +455,10 @@ end
 --tests.floatApiForwardTest = forwardApiTestFactory('torch.FloatTensor')
 --tests.cudaApiForwardTest = forwardApiTestFactory('torch.CudaTensor')
 --tests.gradCheck = gradCheck
---tests.gradCheckLM = gradCheckLM
+tests.gradCheckLM = gradCheckLM
 --tests.overfit = overfit
 --tests.sample = sample
-tests.sample_beam = sample_beam
+--tests.sample_beam = sample_beam
 --
 tester:add(tests)
 tester:run()

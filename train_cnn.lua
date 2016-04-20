@@ -46,6 +46,8 @@ cmd:option('-hsm',0,'number of clusters to use for hsm. 0 = normal softmax, -1 =
 
 cmd:option('-input_encoding_size',512,'the encoding size of each token in the vocabulary, and the image.')
 
+cmd:option('-beam_size', 2, 'used when sample_max = 1, indicates number of beams in beam search. Usually 2 or 3 works well. More is not better. Set this to 1 for faster runtime but a bit worse performance.')
+cmd:option('-temperature', 1.0, 'temperature when sampling from distributions (i.e. when sample_max = 0). Lower = "safer" predictions.')
 -- Optimization: General
 cmd:option('-max_iters', -1, 'max number of iterations to run for (-1 = run forever)')
 cmd:option('-batch_size',16,'what is the batch size in number of images per batch? (there will be x seq_per_img sentences)')
@@ -174,7 +176,8 @@ assert(cnn_params:nElement() == cnn_grad_params:nElement())
 -- for checkpointing to write significantly smaller checkpoint files
 local thin_lm = protos.lm:clone()
 thin_lm.core:share(protos.lm.core, 'weight', 'bias') -- TODO: we are assuming that LM has specific members! figure out clean way to get rid of, not modular.
---thin_lm.lookup_table:share(protos.lm.lookup_table, 'weight', 'bias')
+thin_lm.char_cnn:share(protos.lm.char_cnn, 'weight', 'bias')
+
 local thin_cnn = protos.cnn:clone('weight', 'bias')
 -- sanitize all modules of gradient storage so that we dont save big checkpoints
 net_utils.sanitize_gradients(thin_cnn)
@@ -214,12 +217,13 @@ local function eval_split(split, evalopt)
     local feats = protos.cnn:forward(data.images)
     local expanded_feats = protos.expander:forward(feats)
     local logprobs = protos.lm:forward{expanded_feats, data.labels, data.chars, loader.char_to_ix}
-    local loss = protos.crit:forward(logprobs, data.labels, data.chars)
+    local loss = protos.crit:forward(logprobs, data.labels)
     loss_sum = loss_sum + loss
     loss_evals = loss_evals + 1
 
     -- forward the model to also get generated samples for each image
-    local seq = protos.lm:sample(feats, loader.char_to_ix, loader.ix_to_word)
+    local sample_opts = { sample_max = opt.sample_max, beam_size = opt.beam_size, temperature = opt.temperature }
+    local seq = protos.lm:sample(feats, loader.char_to_ix, loader.ix_to_word, sample_opts)
     local sents = net_utils.decode_sequence(vocab, seq)
     for k=1,#sents do
       local entry = {image_id = data.infos[k].id, caption = sents[k]}
@@ -277,7 +281,7 @@ local function lossFun()
   -- forward the language model
   local logprobs = protos.lm:forward{expanded_feats, data.labels, data.chars, loader.char_to_ix}
   -- forward the language model criterion
-  local loss = protos.crit:forward(logprobs, data.labels, data.chars)
+  local loss = protos.crit:forward(logprobs, data.labels)
   
   -----------------------------------------------------------------------------
   -- Backward pass
@@ -312,6 +316,12 @@ end
 -------------------------------------------------------------------------------
 -- Main loop
 -------------------------------------------------------------------------------
+if string.len(opt.start_from) > 0 then
+  local val_loss, val_predictions, lang_stats = eval_split('val', {val_images_use = opt.val_images_use})
+  print('validation loss: ', val_loss)
+  print(lang_stats)
+end
+
 local loss0
 local optim_state = {}
 local cnn_optim_state = {}

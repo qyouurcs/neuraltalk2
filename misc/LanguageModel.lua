@@ -222,6 +222,7 @@ function layer:sample_beam(imgs, opt)
 
         -- construct new beams
         new_state = net_utils.clone_list(state)
+        debugger.enter()
         local beam_seq_prev, beam_seq_logprobs_prev
         if t > 3 then
           -- well need these as reference when we fork beams around

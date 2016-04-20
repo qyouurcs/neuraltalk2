@@ -8,6 +8,7 @@ require 'torch'
 require 'misc.LanguageModel'
 
 local gradcheck = require 'misc.gradcheck'
+debugger = require('fb.debugger')
 
 local tests = {}
 local tester = torch.Tester()
@@ -308,14 +309,14 @@ local function sample_beam()
   tester:assert(torch.all(torch.gt(logsum2, logsum)))
 end
 
-tests.doubleApiForwardTest = forwardApiTestFactory('torch.DoubleTensor')
-tests.floatApiForwardTest = forwardApiTestFactory('torch.FloatTensor')
-tests.cudaApiForwardTest = forwardApiTestFactory('torch.CudaTensor')
-tests.gradCheck = gradCheck
+--tests.doubleApiForwardTest = forwardApiTestFactory('torch.DoubleTensor')
+--tests.floatApiForwardTest = forwardApiTestFactory('torch.FloatTensor')
+--tests.cudaApiForwardTest = forwardApiTestFactory('torch.CudaTensor')
+--tests.gradCheck = gradCheck
 tests.gradCheckLM = gradCheckLM
-tests.overfit = overfit
-tests.sample = sample
-tests.sample_beam = sample_beam
+--tests.overfit = overfit
+--tests.sample = sample
+--tests.sample_beam = sample_beam
 
 tester:add(tests)
 tester:run()
