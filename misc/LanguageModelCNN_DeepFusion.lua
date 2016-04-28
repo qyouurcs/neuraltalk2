@@ -9,8 +9,7 @@ local utils = require 'misc.utils'
 -- Language Model core
 -------------------------------------------------------------------------------
 
-
-local layer, parent = torch.class('nn.LanguageModelCNN', 'nn.Module')
+local layer, parent = torch.class('nn.LanguageModelCNN_DeepFusion', 'nn.Module')
 
 function layer:__init(opt)
     parent.__init(self)
@@ -28,15 +27,35 @@ function layer:__init(opt)
 
     self.input_encoding_size = utils.getopt(opt, 'input_encoding_size')
     self.rnn_size = utils.getopt(opt, 'rnn_size')
+    self.lmpre_rnn_size = utils.getopt(opt, 'lmpre_rnn_size')
     self.num_layers = utils.getopt(opt, 'num_layers', 1)
     local dropout = utils.getopt(opt, 'dropout', 0)
     -- options for Language Model
     self.seq_length = utils.getopt(opt, 'seq_length')
     -- create the core lstm network. note +1 for both the START and END tokens
-    self.core = LSTM.lstm(self.input_encoding_size, self.vocab_size + 1, self.rnn_size, self.num_layers, dropout)
-    self.char_cnn = LSTMTD.lstmtdnn(self.input_encoding_size, self.vocab_size, self.rnn_size, self.char_size, self.char_vec_size, self.feature_maps, self.kernels, self.max_word_l, self.use_words, self.use_chars, self.batch_norm, self.highway_layers)
+    self.core = LSTM.lstm(self.input_encoding_size, self.vocab_size + 1, self.rnn_size, self.lmpre_rnn_size, self.num_layers, dropout)
+    self.char_cnn = LSTMTD.lstmtdnn(self.input_encoding_size, 
+                                self.vocab_size, 
+                                self.rnn_size, 
+                                self.char_size, 
+                                self.char_vec_size, 
+                                self.feature_maps, 
+                                self.kernels, 
+                                self.max_word_l, 
+                                self.use_words, 
+                                self.use_chars, 
+                                self.batch_norm, 
+                                self.highway_layers)
+
     self:_createInitState(1) -- will be lazily resized later during forward passes
+    -- Also, the prelm module.
+    self.prelm_init = torch.zeros(self.lmpre_rnn_size)
+
+    -- We need to have the lm, we do not fine-tune this LM.
+    self.lm_pre = utils.getopt(opt, 'lm_pre'):clone('weight', 'bias')
+    self.char_to_ix_pre = utils.getopt(opt, 'char_to_ix_pre')
 end
+
 function layer:getModulesList()
   return {self.core, self.char_cnn}
 end
@@ -55,6 +74,8 @@ function layer:_createInitState(batch_size)
         end
     end
     self.num_state = #self.init_state
+
+    -- The good point of the module.
 end
 
 function layer:get_input(x, x_char, t )
@@ -71,13 +92,15 @@ function layer:forward(input)
     local seq = input[2] -- D * N (V_C = opt.char_vocab_size)
     local char_seq = input[3] -- D * N * V_C (V_C = opt.char_vocab_size)
     local char_to_ix = input[4]
+    -- This is for deep fusion, we first forward on the LM module to obtain all the hidden state of the LM_pre
+    -- If we write it this way, we have to use the same dictionary for both the LM_PRE and the caption LM. 
+    -- D * N * hid_LSTM
+    local lm_hid = self.lm_pre:forward({seq, char_seq, char_to_ix})
 
     if self.clones == nil then self:createClones() end -- lazily create clones on first forward pass
     assert(seq:size(1) == self.seq_length)
     local batch_size = seq:size(2)
-    -- Here we use self.seq_length + 1 instead of self.seq_length + 2. 
-    -- This is because we do not add #start# token at the start of each sentence.
-    --self.output:resize(self.seq_length+2, batch_size, self.vocab_size+1)
+
     self.output:resize(self.seq_length+2, batch_size, self.vocab_size+1)
     self:_createInitState(batch_size)
     -- originally, return a (D + 2 ) * N * (M + 1) M = opt.vocab_size
@@ -144,7 +167,12 @@ function layer:forward(input)
         end
 
         if not can_skip then
-            self.inputs[t] = {xt,unpack(self.state[t-1])}
+            if t < 3 then
+                -- We add the zeros to the image and the start.
+                self.inputs[t] = {xt,self.prelm_init,unpack(self.state[t-1])}
+            else
+                self.inputs[t] = {xt,lm_hid[t-2],unpack(self.state[t-1])}
+            end
             local out = self.clones['core'][t]:forward(self.inputs[t])
             self.output[t] = out[self.num_state+1] -- last element is the output vector
             self.state[t] = {} -- the rest is state
@@ -174,8 +202,9 @@ function layer:backward(input, gradOutput)
         local dinputs = self.clones['core'][t]:backward(self.inputs[t], dout)
         -- split the gradient to xt and to state
         local dxt = dinputs[1] -- first element is the input vector
+        local dx_prelm = dinputs[2] -- second is the prelm_hid, we just ignore this, since we do not try to overwrite the pre-lm.
         dstate[t-1] = {} -- copy over rest to state grad
-        for k=2,self.num_state+1 do table.insert(dstate[t-1], dinputs[k]) end
+        for k=3,self.num_state+1 do table.insert(dstate[t-1], dinputs[k]) end
         -- continue backprop of xt
         if t == 1 then
             dimgs = dxt
@@ -531,3 +560,5 @@ function layer:sample_beam(imgs, char_to_ix, ix_to_word, opt)
   -- return the samples and their log likelihoods
   return seq, seqLogprobs
 end
+
+

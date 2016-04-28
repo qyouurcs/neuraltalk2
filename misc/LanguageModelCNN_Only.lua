@@ -247,7 +247,7 @@ Careful: make sure model is in :evaluate() mode if you're calling this.
 Returns: a DxN LongTensor with integer elements 1..M, 
 where D is sequence length and N is batch (so columns are sequences)
 --]]
-function layer:sample(imgs, char_to_ix, ix_to_word, opt)
+function layer:sample(char_to_ix, ix_to_word, opt)
   local sample_max = utils.getopt(opt, 'sample_max', 1)
   local beam_size = utils.getopt(opt, 'beam_size', 1)
   local temperature = utils.getopt(opt, 'temperature', 1.0)
@@ -255,9 +255,9 @@ function layer:sample(imgs, char_to_ix, ix_to_word, opt)
   local end_ = utils.getopt(opt, 'end_char', '}')
   local zeropad = utils.getopt(opt, 'zeropad', ' ')
 
-  if sample_max == 1 and beam_size > 1 then return self:sample_beam(imgs, char_to_ix, ix_to_word, opt) end -- indirection for beam search
+  if sample_max == 1 and beam_size > 1 then return self:sample_beam(char_to_ix, ix_to_word, opt) end -- indirection for beam search
 
-  local batch_size = imgs:size(1)
+  local batch_size = 2
   self:_createInitState(batch_size)
   local state = self.init_state
 
@@ -270,11 +270,6 @@ function layer:sample(imgs, char_to_ix, ix_to_word, opt)
 
     local xt, it, sampleLogprobs
     if t == 1 then
-      -- feed in the images
-      xt = imgs
-    elseif t == 2 then
-      -- feed in the start tokens.
-      --
       local start_tok = "trats"
       -- encode the start token.
       local batch_start = torch.LongTensor(batch_size, self.max_word_l):fill(char_to_ix[' '])
@@ -347,9 +342,9 @@ function layer:sample(imgs, char_to_ix, ix_to_word, opt)
       xt = self.char_cnn:forward(chars_i)
     end
 
-    if t >= 3 then 
-      seq[t-2] = it -- record the samples
-      seqLogprobs[t-2] = sampleLogprobs:view(-1):float() -- and also their log likelihoods
+    if t >= 2 then 
+      seq[t-1] = it -- record the samples
+      seqLogprobs[t-1] = sampleLogprobs:view(-1):float() -- and also their log likelihoods
     end
     local inputs = {xt,unpack(state)}
     local out = self.core:forward(inputs)
@@ -367,9 +362,9 @@ Not 100% sure it's correct, and hard to fully unit test to satisfaction, but
 it seems to work, doesn't crash, gives expected looking outputs, and seems to 
 improve performance, so I am declaring this correct.
 ]]--
-function layer:sample_beam(imgs, char_to_ix, ix_to_word, opt)
+function layer:sample_beam(char_to_ix, ix_to_word, opt)
   local beam_size = utils.getopt(opt, 'beam_size', 10)
-  local batch_size, feat_dim = imgs:size(1), imgs:size(2)
+  local batch_size = 2
   local function compare(a,b) return a.p > b.p end -- used downstream
   local start = utils.getopt(opt, 'start_char', '{')
   local end_ = utils.getopt(opt, 'end_char', '}')
@@ -393,15 +388,11 @@ function layer:sample_beam(imgs, char_to_ix, ix_to_word, opt)
     local beam_logprobs_sum = torch.zeros(beam_size) -- running sum of logprobs for each beam
     local logprobs -- logprobs predicted in last time step, shape (beam_size, vocab_size+1)
     local done_beams = {}
-    for t=1,self.seq_length+2 do
+    for t=1,self.seq_length+1 do
 
       local xt, it, sampleLogprobs
       local new_state
       if t == 1 then
-        -- feed in the images
-        local imgk = imgs[{ {k,k} }]:expand(beam_size, feat_dim) -- k'th image feature expanded out
-        xt = imgk
-      elseif t == 2 then
         -- Here, we should provide the #start token.
         -- feed in the start tokens
         local start_tok = "trats"
@@ -444,10 +435,10 @@ function layer:sample_beam(imgs, char_to_ix, ix_to_word, opt)
         -- construct new beams
         new_state = net_utils.clone_list(state)
         local beam_seq_prev, beam_seq_logprobs_prev
-        if t > 3 then
+        if t > 2 then
           -- well need these as reference when we fork beams around
-          beam_seq_prev = beam_seq[{ {1,t-3}, {} }]:clone()
-          beam_seq_logprobs_prev = beam_seq_logprobs[{ {1,t-3}, {} }]:clone()
+          beam_seq_prev = beam_seq[{ {1,t-2}, {} }]:clone()
+          beam_seq_logprobs_prev = beam_seq_logprobs[{ {1,t-2}, {} }]:clone()
         end
 
         local vix = 1
@@ -460,9 +451,9 @@ function layer:sample_beam(imgs, char_to_ix, ix_to_word, opt)
 
           local v = candidates[vix]
           -- fork beam index q into index vix
-          if t > 3 then
-            beam_seq[{ {1,t-3}, vix_cnt }] = beam_seq_prev[{ {}, v.q }]
-            beam_seq_logprobs[{ {1,t-3}, vix_cnt }] = beam_seq_logprobs_prev[{ {}, v.q }]
+          if t > 2 then
+            beam_seq[{ {1,t-2}, vix_cnt }] = beam_seq_prev[{ {}, v.q }]
+            beam_seq_logprobs[{ {1,t-2}, vix_cnt }] = beam_seq_logprobs_prev[{ {}, v.q }]
           end
           -- rearrange recurrent states
           for state_ix = 1,#new_state do
@@ -470,11 +461,11 @@ function layer:sample_beam(imgs, char_to_ix, ix_to_word, opt)
             new_state[state_ix][vix_cnt] = state[state_ix][v.q]
           end
           -- append new end terminal at the end of this beam
-          beam_seq[{ t-2, vix_cnt }] = v.c -- c'th word is the continuation
-          beam_seq_logprobs[{ t-2, vix_cnt }] = v.r -- the raw logprob here
+          beam_seq[{ t-1, vix_cnt }] = v.c -- c'th word is the continuation
+          beam_seq_logprobs[{ t-1, vix_cnt }] = v.r -- the raw logprob here
           beam_logprobs_sum[vix_cnt] = v.p -- the new (sum) logprob along this beam
 
-          if v.c == self.vocab_size+1 or t == self.seq_length+2 then
+          if v.c == self.vocab_size+1 or t == self.seq_length+1 then
             -- END token special case here, or we reached the end.
             -- add the beam to a set of done beams
             -- NOw, we need to back one.
@@ -491,7 +482,7 @@ function layer:sample_beam(imgs, char_to_ix, ix_to_word, opt)
         end
         
         -- encode as vectors
-        it = beam_seq[t-2]
+        it = beam_seq[t-1]
         -- Now, we need to encode from word to char_cnn.
         local char_it = torch.LongTensor(it:size(1), self.max_word_l):fill(char_to_ix[' '])
         char_it[{{}, 1}]:fill(char_to_ix['{'])
@@ -522,67 +513,4 @@ function layer:sample_beam(imgs, char_to_ix, ix_to_word, opt)
 
   -- return the samples and their log likelihoods
   return seq, seqLogprobs
-end
-
--------------------------------------------------------------------------------
--- Language Model-aware Criterion
--------------------------------------------------------------------------------
-
-local crit, parent = torch.class('nn.LanguageModelCNNOnlyCriterion', 'nn.Criterion')
-function crit:__init()
-  parent.__init(self)
-end
-
---[[
-input is a Tensor of size (D+2)xNx(M+1)
-seq is a LongTensor of size DxN. The way we infer the target
-in this criterion is as follows:
-- at first time step the output is ignored (loss = 0). It's the image tick
-- the label sequence "seq" is shifted by one to produce targets
-- at last time step the output is always the special END token (last dimension)
-The criterion must be able to accomodate variably-sized sequences by making sure
-the gradients are properly set to zeros where appropriate.
---]]
-function crit:updateOutput(input, seq)
-  self.gradInput:resizeAs(input):zero() -- reset to zeros
-  local L,N,Mp1 = input:size(1), input:size(2), input:size(3)
-  local D = seq:size(1)
-  assert(D == L-2, 'input Tensor should be 2 larger in time')
-
-  local loss = 0
-  local n = 0
-  for b=1,N do -- iterate over batches
-    local first_time = true
-    for t=2,L do -- iterate over sequence time (ignore t=1, dummy forward for the image)
-
-      -- fetch the index of the next token in the sequence
-      local target_index
-      if t-1 > D then -- we are out of bounds of the index sequence: pad with null tokens
-        target_index = 0
-      else
-        target_index = seq[{t-1,b}] -- t-1 is correct, since at t=2 START token was fed in and we want to predict first word (and 2-1 = 1).
-      end
-      -- the first time we see null token as next index, actually want the model to predict the END token
-      if target_index == 0 and first_time then
-        target_index = Mp1
-        first_time = false
-      end
-
-      -- if there is a non-null next token, enforce loss!
-      if target_index ~= 0 then
-        -- accumulate loss
-        loss = loss - input[{ t,b,target_index }] -- log(p)
-        self.gradInput[{ t,b,target_index }] = -1
-        n = n + 1
-      end
-
-    end
-  end
-  self.output = loss / n -- normalize by number of predictions that were made
-  self.gradInput:div(n)
-  return self.output
-end
-
-function crit:updateGradInput(input, seq)
-  return self.gradInput
 end
